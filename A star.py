@@ -389,7 +389,7 @@ def main(win, width):
                     A_star_clear (lambda: draw(win, grid, ROWS, width), grid, start, end)
                     
                 if event.key == pg.K_r:                            
-                    rrt_algorithm(start,end,width,width,a)
+                    rrt_algorithm(start,end,width,width,rectang_list)
                   
     pg.quit()
 
