@@ -4,11 +4,17 @@ import math
 import numpy as np
 from queue import PriorityQueue
 import time
+from enum import Enum
+from collections import deque
+import random
+import torch
+from model import Linear_QNet,QTrainer
+from helper import plot
 
 WIDTH = 600 
 WIN = pg.display.set_mode((WIDTH,WIDTH)) # Screen Dimension
-pg.display.set_caption("A* Path Finding Algorithm") # Title
-obstaclesSurface = pg.Surface((WIDTH, WIDTH))
+pg.display.set_caption("A* and RRT") # Title
+pg.time.Clock()
 
 RED = (255,0,0)
 GREEN = (0,255,0)
@@ -23,6 +29,9 @@ L_GREY = (200,200,200)
 TURQUOISE = (64,224,208)
 
 t1=0
+MAX_MEMORY = 100_000
+BATCH_SIZE = 1000
+LR = 0.001
         
 class Spot:
     def __init__(self,row,col,width,total_rows):
@@ -37,6 +46,12 @@ class Spot:
         
     def get_pos(self):
         return self.row, self.col
+    
+    def get_x(self):
+        return (self.x)
+    
+    def get_y(self):
+        return (self.y)
     
     def is_closed(self):
         return self.color == L_GREY
@@ -288,7 +303,7 @@ class RRT:
         self.y = []
         self.parent = []
         self.rectang_list = rectang
-        
+                
         # initialize the tree
         self.x.append(self.start_x)
         self.y.append(self.start_y)
@@ -465,12 +480,13 @@ def rrt_algorithm(start,end,width,height,obstacle):
     graph = RRT(start,end,width,height,obstacle)
     iteration = 0
     t1=time.time()
+    clock = pg.time.Clock()
     while(not graph.path_to_goal()):
         elapsed=time.time()-t1
         t1=time.time()
         if elapsed > 10:
             raise
-        if iteration % 2 == 0:
+        if iteration % 10 == 0:
             x,y,Parent = graph.bias()
             pg.draw.circle(WIN,GREY,(x[-1],y[-1]),2,0)
             pg.draw.line(WIN,BLUE,(x[-1],y[-1]),(x[Parent[-1]],y[Parent[-1]]),2)
@@ -482,13 +498,261 @@ def rrt_algorithm(start,end,width,height,obstacle):
             
         if iteration % 5 == 0:
             pg.display.update()
+            clock.tick(10)
         iteration +=1
     graph.drawPath(graph.getPathCoords())   
     pg.display.update()
     pg.event.clear()
     pg.event.wait()
     
+class Direction(Enum):
+    RIGHT = 1
+    LEFT = 2
+    UP = 3
+    DOWN = 4
+    HOLD = 5
+    
+class Game:
+    def __init__(self,x,y,win,obstacle_list,width,goal_x,goal_y,rows,start,end):
+        self.width = width
+        self.height = width
+        self.display = win
+        self.rows = rows
+        self.start_x = x
+        self.start_y = y
+        self.win = win
+        self.start = start
+        self.end = end
+        self.obstacle_list = obstacle_list
+        self.goal_x = goal_x
+        self.goal_y = goal_y
+        self.speed = 20
+        self.clock = pg.time.Clock()
+        self.reset()
+           
+    def reset(self):
+        self.direction = Direction.HOLD
+        self.x = self.start_x
+        self.y = self.start_y
+        self.player = pg.Rect(self.x,self.y,20,20)
+        self.frame_iteration = 0
 
+    def play_step(self, action):
+        self.frame_iteration +=1
+        self.p_player = pg.Rect(self.x,self.y,20,20)
+        # move
+        self._move(action) # update the head
+        
+        # check if game over
+        reward = 0
+        game_over = False
+        if self._is_collision(self.player) or self.frame_iteration > 450:
+            game_over = True
+            reward = -10
+            return reward, game_over
+        
+        if self._reach_goal():
+            game_over = True
+            reward = 10
+            return reward, game_over
+
+        # update ui and clock
+        self.update()
+        self.clock.tick(self.speed)
+        # 6. return game over
+        return reward, game_over
+        
+    def update(self):
+        
+        self.display.fill(WHITE)
+        draw_grid(self.display, self.rows, self.width)
+        for obstacle in self.obstacle_list:
+            pg.draw.rect(self.display,BLACK,obstacle)
+        pg.draw.rect(self.display,ORANGE,self.start)
+        pg.draw.rect(self.display,TURQUOISE,self.end)
+        pg.draw.rect(self.display,BLUE,self.player)
+
+        pg.display.update()
+        
+    def _is_collision(self,rect):
+        # hit obstacle
+        for obstacle in self.obstacle_list:
+            if pg.Rect.colliderect(rect, obstacle):
+                return True
+        # out of bound
+        if rect.x > (self.width - 20) or rect.x < 0 or rect.y > (self.height - 20) or rect.y < 0:
+            return True
+        return  False
+    
+    def _reach_goal(self):
+        # reach goal
+        if pg.Rect.collidepoint(self.player, (self.goal_x, self.goal_y)):
+            return True
+        return False
+    
+    def _move(self, action):
+        
+        #clock_wise = [Direction.RIGHT, Direction.DOWN, Direction.LEFT, Direction.UP, Direction.HOLD]
+
+        
+        if np.array_equal(action,[1,0,0,0,0]):
+            new_dir = Direction.RIGHT # Right
+        elif np.array_equal(action,[0,1,0,0,0]):
+            new_dir = Direction.DOWN # Down
+        elif np.array_equal(action,[0,0,1,0,0]):
+            new_dir = Direction.LEFT # Left
+        elif np.array_equal(action,[0,0,0,1,0]):
+            new_dir = Direction.UP # Up
+        else: #[0,0,0,0,1]
+            new_dir = Direction.HOLD # Stay
+            
+        self.direction = new_dir
+
+        if self.direction == Direction.RIGHT:
+            self.x += 20
+        elif self.direction == Direction.LEFT:
+            self.x -= 20
+        elif self.direction == Direction.DOWN:
+            self.y += 20
+        elif self.direction == Direction.UP:
+            self.y -= 20
+        else:
+            self.x += 0
+            self.y += 0
+            
+        self.player = pg.Rect(self.x,self.y,20,20)
+        
+class Agent:
+
+    def __init__(self):
+        self.n_games = 0
+        self.epsilon = 0 # randomness
+        self.gamma = 0.9 # discount rate
+        self.memory = deque(maxlen=MAX_MEMORY) # popleft()
+        self.model = Linear_QNet(13, 256, 5)
+        self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
+
+
+    def get_state(self, game):
+        player = game.player
+        left_rect = pg.Rect(player.x - 20, player.y,20,20)
+        right_rect = pg.Rect(player.x + 20, player.y,20,20)
+        up_rect = pg.Rect(player.x, player.y - 20,20,20)
+        down_rect = pg.Rect(player.x, player.y + 20,20,20)
+        
+        dir_l = game.direction == Direction.LEFT
+        dir_r = game.direction == Direction.RIGHT
+        dir_u = game.direction == Direction.UP
+        dir_d = game.direction == Direction.DOWN
+        dir_h = game.direction == Direction.HOLD
+
+        state = [
+            # Danger up
+            (game._is_collision(up_rect)),
+            
+            # Danger down
+            (game._is_collision(down_rect)),
+            
+            # Danger left
+            (game._is_collision(left_rect)),
+            
+            # Danger right
+            (game._is_collision(right_rect)),
+            
+            # Move direction
+            dir_l,
+            dir_r,
+            dir_u,
+            dir_d,
+            dir_h,
+            
+            # goal location 
+            game.goal_x < game.x,  # goal left
+            game.goal_x > game.x,  # goal right
+            game.goal_y < game.y,  # goal up
+            game.goal_y > game.y   # goal down
+            ]
+
+        return np.array(state, dtype=int)
+
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done)) # popleft if MAX_MEMORY is reached
+
+    def train_long_memory(self):
+        if len(self.memory) > BATCH_SIZE:
+            mini_sample = random.sample(self.memory, BATCH_SIZE) # list of tuples
+        else:
+            mini_sample = self.memory
+
+        states, actions, rewards, next_states, dones = zip(*mini_sample)
+        self.trainer.train_step(states, actions, rewards, next_states, dones)
+        #for state, action, reward, nexrt_state, done in mini_sample:
+        #    self.trainer.train_step(state, action, reward, next_state, done)
+
+    def train_short_memory(self, state, action, reward, next_state, done):
+        self.trainer.train_step(state, action, reward, next_state, done)
+
+    def get_action(self, state):
+        # random moves: tradeoff exploration / exploitation
+        self.epsilon = 80 - self.n_games
+        final_move = [0,0,0,0,0]
+        if random.randint(0, 200) < self.epsilon:
+            move = random.randint(0, 2)
+            final_move[move] = 1
+        else:
+            state0 = torch.tensor(state, dtype=torch.float)
+            prediction = self.model(state0)
+            move = torch.argmax(prediction).item()
+            final_move[move] = 1
+
+        return final_move
+
+
+def train(x,y,win,obstacle_list,width,goal_x,goal_y,rows,start,end):
+    
+    plot_reward = []
+    plot_mean_reward = []
+    total_reward = 0
+    agent = Agent()
+    game = Game(x,y,win,obstacle_list,width,goal_x,goal_y,rows,start,end)
+    
+    while True:
+        # get old state
+        state_old = agent.get_state(game)
+
+        # get move
+        final_move = agent.get_action(state_old)
+
+        # perform move and get new state
+        reward, done = game.play_step(final_move)
+        state_new = agent.get_state(game)
+
+        # train short memory
+        agent.train_short_memory(state_old, final_move, reward, state_new, done)
+
+        # remember
+        agent.remember(state_old, final_move, reward, state_new, done)
+
+        if done:
+            # train long memory, plot result
+            game.reset()
+            agent.n_games += 1
+            agent.train_long_memory()
+
+            print('Game', agent.n_games,'Reward', reward)
+            plot_reward.append(reward)
+            total_reward += reward
+            mean_score = total_reward / agent.n_games
+            plot_mean_reward.append(mean_score)
+            plot(plot_reward, plot_mean_reward)
+            
+    print('End')
+    
+    
+def q_algorithm(x,y,win,rectang_list,width,goal_x,goal_y,rows,start,end):
+    train(x,y,win,rectang_list,width,goal_x,goal_y,rows,start,end)
+
+    
 def main(win, width):
     ROWS = 30
     grid = make_grid(ROWS,width)
@@ -514,6 +778,7 @@ def main(win, width):
                 if not start and node != end:
                     start = node
                     start.make_start()
+                    print(start.get_x(),start.get_y())
                     
                 elif not end and node != start:
                     end = node
@@ -553,6 +818,13 @@ def main(win, width):
                     
                 if event.key == pg.K_r:                            
                     rrt_algorithm(start.rect,end.rect,width,width,rectang_list)
+                    
+                if event.key == pg.K_t:
+                    q_algorithm(start.get_x(),start.get_y(),win,rectang_list,width,end.x,end.y,ROWS,start.rect,end.rect)
+            
+                    
+                    
+                
                   
     pg.quit()
 
